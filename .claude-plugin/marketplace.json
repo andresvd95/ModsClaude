@@ -1,0 +1,11 @@
+{
+  "name": "mods-claude",
+  "owner": { "name": "andresvd95" },
+  "plugins": [
+    {
+      "name": "agent-pulse",
+      "source": "./agent-pulse",
+      "description": "Uso de Claude (5h y semanal), agentes con barra de progreso, router de modelo con Haiku y un orquestador que narra lo que pasa."
+    }
+  ]
+}

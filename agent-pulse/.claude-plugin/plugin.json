@@ -1,0 +1,8 @@
+{
+  "name": "agent-pulse",
+  "version": "0.1.0",
+  "description": "Uso de Claude (5h y semanal), agentes con progreso, router de modelo con Haiku y orquestador que narra lo que pasa.",
+  "author": { "name": "andresvd95" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
