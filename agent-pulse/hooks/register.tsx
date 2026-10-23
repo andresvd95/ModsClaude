@@ -4,16 +4,21 @@ import type { AgentSpawnInput, EngineInterface, Register, SessionRateLimit } fro
 import type {
   PulseAgent,
   PulseAgentStatus,
+  PulseDecider,
+  PulseDecision,
   PulseLogLevel,
   PulseMode,
+  PulseStep,
+  PulseThinking,
   PulseTier,
   PulseUsage,
   PulseWindow,
 } from '../types'
 
-// agent-pulse: uso de Claude (5h / semanal), agentes con progreso,
-// router de modelo por agente (clasificador Haiku + reglas) y un
-// orquestador que narra lo que pasa en una bitácora, toasts y la barra de estado.
+// agent-pulse v2: uso de Claude (5h / semanal), agentes con progreso, un router
+// de modelo que deja ver toda su decisión (quién lanzó el agente, qué pensó
+// Haiku, si consultó a Sonnet, qué se asignó y por qué) y un orquestador que
+// narra en vivo cuándo piensa cada modelo y a quién asigna cada tarea.
 
 const PANE = 'agent-pulse'
 const TITLE = 'Claude Pulse'
@@ -26,12 +31,21 @@ const agentsAtom = atom({ plugin: 'agent-pulse', key: 'agents' } as const, [] as
 const logAtom = atom({ plugin: 'agent-pulse', key: 'log' } as const, [])
 const modeAtom = atom({ plugin: 'agent-pulse', key: 'mode' } as const, 'auto' as PulseMode)
 const tickAtom = atom({ plugin: 'agent-pulse', key: 'tick' } as const, 0)
+const thinkingAtom = atom({ plugin: 'agent-pulse', key: 'thinking' } as const, [] as PulseThinking[])
 
 const TIERS: PulseTier[] = ['haiku', 'sonnet', 'opus']
 const TIER_LABEL: Record<PulseTier, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
+const DECIDER_LABEL: Record<PulseDecider, string> = {
+  haiku: 'Haiku',
+  sonnet: 'Sonnet',
+  reglas: 'Reglas',
+  workflow: 'Workflow',
+}
 // Llamadas a herramientas que se esperan por nivel: base de la barra estimada.
 const EXPECTED_TOOLS: Record<PulseTier, number> = { haiku: 10, sonnet: 18, opus: 28 }
 const ALERT_LEVELS = [50, 80, 95]
+// Por debajo de esta confianza, Haiku pide segunda opinión a Sonnet.
+const MIN_CONFIDENCE = 70
 const WINDOW_LABEL: Record<string, string> = {
   five_hour: 'Sesión 5h',
   seven_day: 'Semanal',
@@ -48,6 +62,11 @@ function tierOf(model: string | undefined): PulseTier | undefined {
   if (m.includes('sonnet')) return 'sonnet'
   if (m.includes('opus') || m.includes('fable')) return 'opus'
   return undefined
+}
+
+function modelLabel(model: string | undefined): string {
+  const t = tierOf(model)
+  return t ? TIER_LABEL[t] : model || '?'
 }
 
 function pct(windows: PulseWindow[], kind: string): number | undefined {
@@ -82,6 +101,11 @@ function duration(ms: number): string {
   return `${s}s`
 }
 
+function seconds(ms: number | undefined): string {
+  if (ms === undefined) return ''
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
+}
+
 function resetsIn(now: number, resetsAt: string | undefined): string {
   if (!resetsAt) return ''
   const at = Date.parse(resetsAt)
@@ -110,20 +134,31 @@ function short(text: string, n: number): string {
   return text.length > n ? text.slice(0, Math.max(1, n - 1)) + '…' : text
 }
 
+const LOG_COLOR: Record<PulseLogLevel, string> = {
+  alert: 'error',
+  warn: 'warning',
+  ok: 'success',
+  info: 'text',
+  think: 'suggestion',
+  assign: 'claude',
+}
+
 async function narrate($: $, level: PulseLogLevel, text: string, toast = false) {
   const at = await $.clock.now()
-  await update($, logAtom, list => [...(list ?? []), { at, level, text }].slice(-60))
+  await update($, logAtom, list => [...(list ?? []), { at, level, text }].slice(-80))
   if (toast) $.ui.toast(text)
 }
 
 async function refreshStatus($: $) {
   const usage = await read($, usageAtom)
   const agents = await read($, agentsAtom)
+  const thinking = await read($, thinkingAtom)
   const parts: string[] = []
   const five = pct(usage.windows, 'five_hour')
   const week = pct(usage.windows, 'seven_day')
   if (five !== undefined) parts.push(`5h ${Math.round(five)}%`)
   if (week !== undefined) parts.push(`sem ${Math.round(week)}%`)
+  if (thinking.length > 0) parts.push(`${TIER_LABEL[thinking[thinking.length - 1]!.by]} pensando`)
   const running = agents.filter(a => a.status === 'running').length
   if (running > 0) parts.push(`${running} agente${running > 1 ? 's' : ''}`)
   $.ui.status(parts.length ? `pulse · ${parts.join(' · ')}` : undefined)
@@ -181,72 +216,194 @@ async function recordUsage(
 
 // ---------- router de modelo ----------
 
-type Pick = { tier: PulseTier; reason: string; source: 'haiku' | 'reglas' }
-
-const ROUTER_SYSTEM = [
-  'Eres un enrutador de modelos para subagentes de Claude Code. Elige el modelo MÁS BARATO que haga bien la tarea.',
+const TIER_GUIDE = [
   'haiku: búsquedas, localizar archivos, leer y resumir, listar, grep, preguntas de un dato, cambios mecánicos triviales.',
   'sonnet: implementar o editar código, escribir tests, depurar errores comunes, investigación de varios pasos, la mayoría del trabajo.',
   'opus: arquitectura, diseño de sistemas, revisión de seguridad, depuración difícil o concurrente, refactors grandes, planes complejos, decisiones con mucho juicio.',
-  'Responde SOLO con JSON en una línea: {"tier":"haiku|sonnet|opus","reason":"máximo 8 palabras en español"}',
 ].join('\n')
 
-function byRules(e: AgentSpawnInput): Pick {
-  const type = e.subagentType.toLowerCase()
-  const text = `${e.description}\n${e.prompt}`.toLowerCase()
-  if (/explore|docs-lookup|search/.test(type)) {
-    return { tier: 'haiku', reason: `tipo ${e.subagentType}: exploración`, source: 'reglas' }
+const ANSWER_FORMAT =
+  'Responde SOLO con JSON en una línea: {"tier":"haiku|sonnet|opus","confidence":0-100,"thought":"tu razonamiento en máximo 20 palabras, en español"}'
+
+const HAIKU_SYSTEM = [
+  'Eres el enrutador de modelos para subagentes de Claude Code. Elige el modelo MÁS BARATO que haga bien la tarea.',
+  TIER_GUIDE,
+  'Sé honesto con la confianza: si dudas entre dos modelos, pon menos de 70.',
+  ANSWER_FORMAT,
+].join('\n')
+
+const SONNET_SYSTEM = [
+  'Eres el segundo revisor del enrutador de modelos para subagentes de Claude Code. Haiku propuso un modelo y pidió tu opinión.',
+  'Elige el modelo MÁS BARATO que haga bien la tarea; puedes confirmar o cambiar la propuesta de Haiku.',
+  TIER_GUIDE,
+  ANSWER_FORMAT,
+].join('\n')
+
+type Verdict = { tier: PulseTier; confidence: number; thought: string }
+
+function parseVerdict(text: string): Verdict | undefined {
+  const m = text.match(/\{[\s\S]*\}/)
+  if (!m) return undefined
+  try {
+    const p = JSON.parse(m[0]) as { tier?: string; confidence?: number; thought?: string; reason?: string }
+    const tier = TIERS.find(t => t === p.tier)
+    if (!tier) return undefined
+    const raw = typeof p.confidence === 'number' ? p.confidence : 80
+    const confidence = Math.round(Math.max(0, Math.min(100, raw <= 1 ? raw * 100 : raw)))
+    return { tier, confidence, thought: short(String(p.thought ?? p.reason ?? '').trim() || 'sin comentario', 140) }
+  } catch {
+    return undefined
   }
-  if (/plan|architect|security|review/.test(type)) {
-    return { tier: 'opus', reason: `tipo ${e.subagentType}: juicio alto`, source: 'reglas' }
-  }
-  if (/arquitect|architect|diseñ|design|seguridad|security|vulnerab|race|concurren|deadlock|migraci|refactor/.test(text)) {
-    return { tier: 'opus', reason: 'tarea de diseño o riesgo alto', source: 'reglas' }
-  }
-  if (/\b(busca|buscar|encuentra|localiza|lista|listar|resume|resumir|lee|leer|search|find|locate|list|grep|summari[sz]e|read)\b/.test(text) && text.length < 1500) {
-    return { tier: 'haiku', reason: 'búsqueda o lectura simple', source: 'reglas' }
-  }
-  return { tier: 'sonnet', reason: 'trabajo general', source: 'reglas' }
 }
 
-async function classify($: $, e: AgentSpawnInput): Promise<Pick> {
-  const ask = [
+function byRules(e: AgentSpawnInput): { tier: PulseTier; thought: string } {
+  const type = e.subagentType.toLowerCase()
+  const text = `${e.description}\n${e.prompt}`.toLowerCase()
+  if (/explore|docs-lookup|search/.test(type)) return { tier: 'haiku', thought: `tipo ${e.subagentType}: exploración` }
+  if (/plan|architect|security|review/.test(type)) return { tier: 'opus', thought: `tipo ${e.subagentType}: juicio alto` }
+  if (/arquitect|architect|diseñ|design|seguridad|security|vulnerab|race|concurren|deadlock|migraci|refactor/.test(text)) {
+    return { tier: 'opus', thought: 'tarea de diseño o riesgo alto' }
+  }
+  if (/\b(busca|buscar|encuentra|localiza|lista|listar|resume|resumir|lee|leer|search|find|locate|list|grep|summari[sz]e|read)\b/.test(text) && text.length < 1500) {
+    return { tier: 'haiku', thought: 'búsqueda o lectura simple' }
+  }
+  return { tier: 'sonnet', thought: 'trabajo general' }
+}
+
+// Un modelo "piensa": se marca en vivo en el panel, la banda y la barra de estado
+// mientras dura la llamada, y se narra lo que respondió.
+async function think(
+  $: $,
+  by: 'haiku' | 'sonnet',
+  key: string,
+  description: string,
+  system: string,
+  prompt: string,
+): Promise<PulseStep> {
+  const startedAt = await $.clock.now()
+  const id = `${key}|${by}`
+  await update($, thinkingAtom, list => [...(list ?? []), { key: id, by, description, startedAt }])
+  await narrate($, 'think', `🧠 ${TIER_LABEL[by]} pensando: "${short(description, 40)}"…`)
+  await refreshStatus($)
+  try {
+    const r = await $.model.complete({
+      model: by,
+      system: [{ text: system, cache: true }],
+      prompt,
+      maxTokens: 160,
+      effort: 'low',
+      timeoutMs: by === 'haiku' ? 10000 : 15000,
+    })
+    const ms = (await $.clock.now()) - startedAt
+    const tokens = r.usage.input_tokens + r.usage.output_tokens
+    const v = r.isAnswered ? parseVerdict(r.text) : undefined
+    if (!v) {
+      const why = r.isAnswered ? 'respuesta ilegible' : r.reason
+      await narrate($, 'warn', `💭 ${TIER_LABEL[by]} no decidió (${why}) en ${seconds(ms)}`)
+      return { by, thought: why, ms, tokens, failed: true }
+    }
+    await narrate(
+      $,
+      'think',
+      `💭 ${TIER_LABEL[by]} → ${TIER_LABEL[v.tier]} (${v.confidence}%) en ${seconds(ms)}: ${v.thought}`,
+    )
+    return { by, tier: v.tier, confidence: v.confidence, thought: v.thought, ms, tokens }
+  } finally {
+    await update($, thinkingAtom, list => (list ?? []).filter(t => t.key !== id))
+    await refreshStatus($)
+  }
+}
+
+function taskText(e: AgentSpawnInput): string {
+  return [
+    `Lanzado por: ${e.parentModel}${e.parentAgentId ? ' (un subagente)' : ' (sesión principal)'}`,
+    e.model ? `Modelo que pidió quien lo lanzó: ${e.model}` : '',
     `Tipo de agente: ${e.subagentType}`,
     `Descripción: ${e.description}`,
     `Tarea:\n${short(e.prompt, 3000)}`,
-  ].join('\n')
-  const r = await $.model.complete({
-    model: 'haiku',
-    system: [{ text: ROUTER_SYSTEM, cache: true }],
-    prompt: ask,
-    maxTokens: 80,
-    effort: 'low',
-    timeoutMs: 10000,
-  })
-  if (r.isAnswered) {
-    const m = r.text.match(/\{[\s\S]*\}/)
-    if (m) {
-      try {
-        const parsed = JSON.parse(m[0]) as { tier?: string; reason?: string }
-        const tier = TIERS.find(t => t === parsed.tier)
-        if (tier) return { tier, reason: short(parsed.reason ?? 'clasificado por Haiku', 60), source: 'haiku' }
-      } catch {
-        // cae a reglas
-      }
-    }
-  }
-  return byRules(e)
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
-function underPressure(pick: Pick, load: number): Pick {
-  if (load >= 95 && pick.tier !== 'haiku') {
-    return { ...pick, tier: 'haiku', reason: `${pick.reason} · límite ≥95% → Haiku` }
+type Choice = { steps: PulseStep[]; decidedBy: PulseDecider; picked: PulseTier }
+
+async function decide($: $, e: AgentSpawnInput): Promise<Choice> {
+  // Un workflow que ya fijó modelo se respeta (salvo presión de uso).
+  const fixed = e.workflow ? tierOf(e.model) : undefined
+  if (fixed) {
+    await narrate($, 'think', `📋 "${short(e.description, 40)}": el workflow ya fijó ${TIER_LABEL[fixed]}`)
+    return {
+      steps: [{ by: 'workflow', tier: fixed, thought: 'modelo fijado por el workflow' }],
+      decidedBy: 'workflow',
+      picked: fixed,
+    }
   }
-  if (load >= 80 && pick.tier !== 'haiku') {
-    const lower = TIERS[TIERS.indexOf(pick.tier) - 1]!
-    return { ...pick, tier: lower, reason: `${pick.reason} · uso ≥80% → baja a ${TIER_LABEL[lower]}` }
+
+  const key = e.tool_use_id || `${e.description}|${await $.clock.now()}`
+  const label = e.description || e.subagentType
+  const ask = taskText(e)
+  const steps: PulseStep[] = []
+
+  const haiku = await think($, 'haiku', key, label, HAIKU_SYSTEM, ask)
+  steps.push(haiku)
+
+  // Segunda opinión: Haiku duda, o propone Opus (lo caro merece confirmarse).
+  const unsure = haiku.tier !== undefined && (haiku.confidence ?? 100) < MIN_CONFIDENCE
+  const pricey = haiku.tier === 'opus'
+  if (unsure || pricey) {
+    const why = unsure ? `duda (${haiku.confidence}%)` : 'propone Opus, que es caro'
+    await narrate($, 'think', `↗ Haiku ${why}: consulta a Sonnet`)
+    const sonnet = await think(
+      $,
+      'sonnet',
+      key,
+      label,
+      SONNET_SYSTEM,
+      `${ask}\n\nPropuesta de Haiku: ${haiku.tier} (confianza ${haiku.confidence}%): ${haiku.thought}`,
+    )
+    steps.push(sonnet)
+    if (sonnet.tier) return { steps, decidedBy: 'sonnet', picked: sonnet.tier }
+    return { steps, decidedBy: 'haiku', picked: haiku.tier! }
   }
-  return pick
+  if (haiku.tier) return { steps, decidedBy: 'haiku', picked: haiku.tier }
+
+  // Haiku no respondió: reglas locales, sin coste.
+  const rules = byRules(e)
+  steps.push({ by: 'reglas', tier: rules.tier, thought: rules.thought })
+  await narrate($, 'think', `📏 Reglas → ${TIER_LABEL[rules.tier]}: ${rules.thought}`)
+  return { steps, decidedBy: 'reglas', picked: rules.tier }
+}
+
+function underPressure(tier: PulseTier, load: number): { tier: PulseTier; note?: string } {
+  if (load >= 95 && tier !== 'haiku') {
+    return { tier: 'haiku', note: `uso ${Math.round(load)}% ≥95% → Haiku` }
+  }
+  if (load >= 80 && tier !== 'haiku') {
+    const lower = TIERS[TIERS.indexOf(tier) - 1]!
+    return { tier: lower, note: `uso ${Math.round(load)}% ≥80% → baja a ${TIER_LABEL[lower]}` }
+  }
+  return { tier }
+}
+
+/** "Haiku 55% → Opus ⟶ Sonnet 90% → Sonnet" */
+function chainText(d: PulseDecision): string {
+  return d.steps
+    .map(s =>
+      s.failed
+        ? `${DECIDER_LABEL[s.by]} ✗`
+        : `${DECIDER_LABEL[s.by]}${s.confidence !== undefined ? ` ${s.confidence}%` : ''} → ${s.tier ? TIER_LABEL[s.tier] : '?'}`,
+    )
+    .join(' ⟶ ')
+}
+
+function launcherText(d: PulseDecision): string {
+  const who = `${modelLabel(d.launcher)}${d.launcherIsAgent ? ' (subagente)' : ' (principal)'}`
+  return d.requested ? `lanzó ${who}, pidió ${modelLabel(d.requested)}` : `lanzó ${who}`
+}
+
+function decidingThought(d: PulseDecision): string {
+  return d.steps.find(s => s.by === d.decidedBy && !s.failed)?.thought ?? ''
 }
 
 // ---------- registro ----------
@@ -259,6 +416,8 @@ export const register: Register = on => {
     if (stored === 'auto' || stored === 'sugerir' || stored === 'off') {
       await $.state.set({ plugin: 'agent-pulse', key: 'mode' }, stored)
     }
+    // Un pensamiento a medias de antes de una recarga ya no está corriendo.
+    await $.state.set({ plugin: 'agent-pulse', key: 'thinking' }, [])
 
     await $.command.register({
       name: 'pulse',
@@ -273,11 +432,12 @@ export const register: Register = on => {
       await refreshStatus($)
     }
 
-    // Reloj para tiempos transcurridos mientras hay agentes corriendo.
-    $.clock.every(3000, () => {
+    // Reloj para tiempos transcurridos mientras hay agentes corriendo o modelos pensando.
+    $.clock.every(1000, () => {
       void (async () => {
         const agents = await read($, agentsAtom)
-        if (agents.some(a => a.status === 'running')) {
+        const thinking = await read($, thinkingAtom)
+        if (thinking.length > 0 || agents.some(a => a.status === 'running')) {
           await update($, tickAtom, n => (n ?? 0) + 1)
         }
       })()
@@ -317,45 +477,69 @@ export const register: Register = on => {
     const usage = await read($, usageAtom)
     const load = pressure(usage)
 
-    let pick: Pick | undefined
+    let decision: PulseDecision | undefined
     if (mode !== 'off') {
-      // Un workflow que ya fijó modelo se respeta, salvo presión de uso.
-      const fixed = e.workflow && tierOf(e.model)
-      pick = fixed
-        ? { tier: fixed, reason: 'modelo fijado por el workflow', source: 'reglas' }
-        : await classify($, e)
-      pick = underPressure(pick, load)
+      const choice = await decide($, e)
+      const adjusted = underPressure(choice.picked, load)
+      if (adjusted.note) await narrate($, 'warn', `⚠ ${adjusted.note}`)
+      decision = {
+        ...choice,
+        final: adjusted.tier,
+        pressureNote: adjusted.note,
+        requested: e.model,
+        launcher: e.parentModel,
+        launcherIsAgent: e.parentAgentId !== undefined,
+        applied: mode === 'auto',
+      }
     }
 
-    const apply = pick !== undefined && mode === 'auto'
-    const result = await next(apply ? { ...e, model: pick!.tier } : e)
+    const result = await next(decision?.applied ? { ...e, model: decision.final } : e)
     if (result.deny !== undefined || !result.agentId) return result
 
-    const tier = tierOf(result.model) ?? pick?.tier ?? 'sonnet'
+    const tier = tierOf(result.model) ?? decision?.final ?? 'sonnet'
+    const desc = e.description || e.subagentType
+    const reason = decision
+      ? `${decision.applied ? '' : `sugerido ${TIER_LABEL[decision.final]} · `}decidió ${DECIDER_LABEL[decision.decidedBy]}: ${decidingThought(decision)}${decision.pressureNote ? ` · ${decision.pressureNote}` : ''}`
+      : 'router apagado'
     const agent: PulseAgent = {
       id: result.agentId,
-      description: e.description || e.subagentType,
+      description: desc,
       type: e.subagentType,
       model: result.model,
       parentModel: e.parentModel,
-      reason: pick
-        ? `${apply ? '' : `sugerido ${TIER_LABEL[pick.tier]} · `}${pick.reason} (${pick.source})`
-        : 'router apagado',
+      reason,
+      decision,
       status: 'running',
       startedAt: await $.clock.now(),
       tools: 0,
       expected: EXPECTED_TOOLS[tier],
     }
     await update($, agentsAtom, list => [...(list ?? []), agent].slice(-40))
-    await narrate(
-      $,
-      'info',
-      `▶ "${short(agent.description, 40)}" (${agent.type}) → ${TIER_LABEL[tier]}: ${agent.reason}`,
-      true,
-    )
+
+    if (!decision) {
+      await narrate($, 'assign', `▶ "${short(desc, 40)}" (${e.subagentType}) corre en ${TIER_LABEL[tier]}: router apagado`, true)
+    } else if (decision.applied) {
+      await narrate(
+        $,
+        'assign',
+        `▶ "${short(desc, 40)}" asignado a ${TIER_LABEL[tier]} · decidió ${DECIDER_LABEL[decision.decidedBy]} · ${launcherText(decision)}`,
+        true,
+      )
+    } else {
+      await narrate(
+        $,
+        'assign',
+        `💡 "${short(desc, 40)}": el router sugiere ${TIER_LABEL[decision.final]} (decidió ${DECIDER_LABEL[decision.decidedBy]}) pero corre en ${TIER_LABEL[tier]}`,
+        true,
+      )
+    }
     await refreshStatus($)
     return result
-  }).catch(($, e, next) => next(e)) // si el router falla, el agente arranca igual
+  }).catch(async ($, e, next) => {
+    // Si el router falla, el agente arranca igual y nada queda "pensando".
+    await $.state.set({ plugin: 'agent-pulse', key: 'thinking' }, [])
+    return next(e)
+  })
 
   // Progreso: cada herramienta que usa un agente avanza su barra.
   on('tool.call', async ($, e, next) => {
@@ -395,7 +579,7 @@ export const register: Register = on => {
     await narrate(
       $,
       status === 'done' ? 'ok' : 'warn',
-      `${icon} "${short(agent.description, 40)}" ${verb} en ${duration(e.durationMs)} · ${agent.tools} herramientas${tokens ? ` · ${kTokens(tokens)}` : ''}`,
+      `${icon} "${short(agent.description, 40)}" (${modelLabel(u?.model ?? agent.model)}) ${verb} en ${duration(e.durationMs)} · ${agent.tools} herramientas${tokens ? ` · ${kTokens(tokens)}` : ''}`,
       true,
     )
     const left = (await read($, agentsAtom)).filter(a => a.status === 'running').length
@@ -412,6 +596,7 @@ export const register: Register = on => {
     const agents = await read($, agentsAtom)
     const log = await read($, logAtom)
     const mode = await read($, modeAtom)
+    const thinking = await read($, thinkingAtom)
     await read($, tickAtom)
 
     const now = await $.clock.now()
@@ -425,6 +610,13 @@ export const register: Register = on => {
       const parent = tierOf(a.parentModel)
       return mine && parent && TIERS.indexOf(mine) < TIERS.indexOf(parent)
     }).length
+    const decided = agents.filter(a => a.decision)
+    const byDecider = (Object.keys(DECIDER_LABEL) as PulseDecider[])
+      .map(d => ({ d, n: decided.filter(a => a.decision!.decidedBy === d).length }))
+      .filter(x => x.n > 0)
+    const byTier = TIERS.map(t => ({ t, n: agents.filter(a => tierOf(a.model) === t).length })).filter(
+      x => x.n > 0,
+    )
 
     const known = ['five_hour', 'seven_day']
     const usageRows = known
@@ -437,14 +629,15 @@ export const register: Register = on => {
       const icon = a.status === 'running' ? '▶' : a.status === 'done' ? '✓' : a.status === 'aborted' ? '■' : '✗'
       const color = a.status === 'running' ? 'claude' : a.status === 'done' ? 'success' : 'error'
       const time = duration((a.endedAt ?? now) - a.startedAt)
+      const d = a.decision
       return (
         <Box key={`a-${a.id}`} flexDirection="column">
           <Text>
             <Text color={color}>{icon} </Text>
             <Text bold>{short(a.description, Math.max(12, cols - 24))}</Text>
-            <Text dimColor>
-              {' '}
-              {a.type} · {TIER_LABEL[tierOf(a.model) ?? 'sonnet']}
+            <Text dimColor> {a.type} · </Text>
+            <Text color="claude" bold>
+              {modelLabel(a.model)}
             </Text>
           </Text>
           <Text>
@@ -457,10 +650,26 @@ export const register: Register = on => {
               {a.tokens ? ` · ${kTokens(a.tokens)}` : ''}
             </Text>
           </Text>
-          <Text dimColor>
-            {'  '}
-            {short(a.reason, Math.max(20, cols - 4))}
-          </Text>
+          {d ? (
+            <Box flexDirection="column">
+              <Text>
+                {'  '}
+                <Text color="suggestion">🧭 {short(chainText(d), Math.max(20, cols - 6))}</Text>
+              </Text>
+              <Text dimColor>
+                {'  '}
+                {short(
+                  `eligió ${DECIDER_LABEL[d.decidedBy]}: ${decidingThought(d)}${d.pressureNote ? ` · ${d.pressureNote}` : ''}${d.applied ? '' : ' · solo sugerido'} · ${launcherText(d)}`,
+                  Math.max(20, cols - 4),
+                )}
+              </Text>
+            </Box>
+          ) : (
+            <Text dimColor>
+              {'  '}
+              {short(a.reason, Math.max(20, cols - 4))}
+            </Text>
+          )}
         </Box>
       )
     }
@@ -503,9 +712,22 @@ export const register: Register = on => {
             onPress={() => update($, agentsAtom, list => (list ?? []).filter(a => a.status === 'running'))}
           />
         </Box>
+        <Text dimColor>{`Haiku decide · si duda (<${MIN_CONFIDENCE}%) o propone Opus, confirma Sonnet · sin respuesta, reglas`}</Text>
+        {byDecider.length > 0 && (
+          <Text>
+            <Text dimColor>Quién decidió: </Text>
+            {byDecider.map(x => `${DECIDER_LABEL[x.d]} ${x.n}`).join(' · ')}
+          </Text>
+        )}
+        {byTier.length > 0 && (
+          <Text>
+            <Text dimColor>Asignados a: </Text>
+            {byTier.map(x => `${TIER_LABEL[x.t]} ${x.n}`).join(' · ')}
+          </Text>
+        )}
         {agents.length > 0 && (
           <Text dimColor>
-            {cheaper}/{agents.length} agentes en un modelo más barato que el principal
+            {cheaper}/{agents.length} agentes en un modelo más barato que quien los lanzó
           </Text>
         )}
 
@@ -519,24 +741,23 @@ export const register: Register = on => {
 
         <Text> </Text>
         <Text bold>ORQUESTADOR</Text>
-        {log.length === 0 && <Text dimColor>Aquí te cuento lo que pasa.</Text>}
+        {thinking.map(t => (
+          <Text key={`t-${t.key}`}>
+            <Text color="suggestion" bold>
+              🧠 {TIER_LABEL[t.by]} pensando
+            </Text>
+            <Text> "{short(t.description, Math.max(10, cols - 30))}"</Text>
+            <Text dimColor> · {duration(now - t.startedAt)}</Text>
+          </Text>
+        ))}
+        {log.length === 0 && thinking.length === 0 && <Text dimColor>Aquí te cuento lo que pasa.</Text>}
         {log
           .slice(-30)
           .reverse()
           .map(entry => (
             <Text>
               <Text dimColor>{clock(entry.at)} </Text>
-              <Text
-                color={
-                  entry.level === 'alert'
-                    ? 'error'
-                    : entry.level === 'warn'
-                      ? 'warning'
-                      : entry.level === 'ok'
-                        ? 'success'
-                        : 'text'
-                }
-              >
+              <Text color={LOG_COLOR[entry.level] ?? 'text'} bold={entry.level === 'assign'}>
                 {short(entry.text, Math.max(20, cols - 7))}
               </Text>
             </Text>
@@ -545,14 +766,15 @@ export const register: Register = on => {
     )
   })
 
-  // Banda sobre el prompt: visible solo con agentes corriendo o uso ≥80%.
+  // Banda sobre el prompt: visible con modelos pensando, agentes corriendo o uso ≥80%.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const usage = await read($, usageAtom)
     const agents = await read($, agentsAtom)
+    const thinking = await read($, thinkingAtom)
     await read($, tickAtom)
     const running = agents.filter(a => a.status === 'running')
     const load = pressure(usage)
-    if (running.length === 0 && load < 80) return next(e)
+    if (running.length === 0 && thinking.length === 0 && load < 80) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
     const cols = e.props.bodyColumns ?? 80
@@ -577,14 +799,23 @@ export const register: Register = on => {
           )}
           <Text dimColor>  /pulse para el panel</Text>
         </Text>
+        {thinking.map(t => (
+          <Text key={`bt-${t.key}`}>
+            <Text color="suggestion">🧠 {TIER_LABEL[t.by]} pensando a quién asignar </Text>
+            "{short(t.description, Math.max(10, cols - 46))}"
+            <Text dimColor> · {duration(now - t.startedAt)}</Text>
+          </Text>
+        ))}
         {running.slice(0, 4).map(a => (
           <Text>
             <Text color="claude">▶ </Text>
-            {short(a.description, Math.max(10, cols - aw - 34))}{' '}
+            {short(a.description, Math.max(10, cols - aw - 44))}{' '}
             <Text color="claude">{bar(agentProgress(a), aw)}</Text>
             <Text dimColor>
               {' '}
-              {TIER_LABEL[tierOf(a.model) ?? 'sonnet']} · {a.tools} herr. · {duration(now - a.startedAt)}
+              {modelLabel(a.model)}
+              {a.decision ? ` (eligió ${DECIDER_LABEL[a.decision.decidedBy]})` : ''} · {a.tools} herr. ·{' '}
+              {duration(now - a.startedAt)}
             </Text>
           </Text>
         ))}

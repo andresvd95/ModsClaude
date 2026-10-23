@@ -5,7 +5,8 @@
     {
       "name": "agent-pulse",
       "source": "./agent-pulse",
-      "description": "Uso de Claude (5h y semanal), agentes con barra de progreso, router de modelo con Haiku y un orquestador que narra lo que pasa."
+      "version": "2.0.0",
+      "description": "Uso de Claude (5h y semanal), agentes con progreso, un router que muestra qué modelo elige y quién decidió (Haiku, Sonnet o reglas) y un orquestador que narra en vivo cuándo piensan y a quién asignan cada tarea."
     }
   ]
 }

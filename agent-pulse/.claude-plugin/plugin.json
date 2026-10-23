@@ -1,7 +1,7 @@
 {
   "name": "agent-pulse",
-  "version": "0.1.0",
-  "description": "Uso de Claude (5h y semanal), agentes con progreso, router de modelo con Haiku y orquestador que narra lo que pasa.",
+  "version": "2.0.0",
+  "description": "Uso de Claude (5h y semanal), agentes con progreso, router que muestra qué modelo elige y quién decidió, y orquestador que narra en vivo cuándo piensan Haiku y Sonnet y a quién asignan cada tarea.",
   "author": { "name": "andresvd95" },
   "license": "MIT",
   "types": "./types/index.d.ts"
