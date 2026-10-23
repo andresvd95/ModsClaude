@@ -6,14 +6,14 @@ Mod de Claude Code para ver y ahorrar el uso de Claude. Corre dentro de la CLI `
 
 - **Uso**: ventana de sesión (5 h) y semanal, con barra, porcentaje y cuánto falta para que reinicie. También el contexto y el costo equivalente de API.
 - **Agentes**: cada agente que se lanza con Task/Agent aparece con su modelo, una barra de progreso estimada (por herramientas usadas), la herramienta actual, el tiempo y los tokens al terminar.
-- **Decisión del router** (nuevo en v2): por agente, la cadena de decisión (`Haiku 55% → Opus ⟶ Sonnet 90% → Sonnet`), quién decidió, qué pensó, el ajuste por uso si lo hubo y quién lanzó el agente y qué modelo pidió.
-- **Orquestador** (mejorado en v2): narra en vivo cuándo piensa Haiku, qué respondió, si consulta a Sonnet, cuándo piensa Sonnet y a quién asignó la tarea. Mientras un modelo piensa aparece arriba como `🧠 Haiku pensando "…" · 2s`.
+- **Decisión del router** (nuevo en v2): por agente, la cadena de decisión (`Haiku 55% → Opus ⟶ Sonnet 90% → Sonnet`), quién decidió y con qué confianza, el ajuste por uso si lo hubo y quién lanzó el agente y qué modelo pidió.
+- **Orquestador** (mejorado en v2): mientras un modelo piensa aparece arriba como `🧠 Haiku pensando "…" · 2s`; al decidir, una sola línea con a quién se asignó la tarea y quién decidió. Sin narración paso a paso.
 - **Barra de estado**: `pulse · 5h 42% · sem 18% · Haiku pensando · 2 agentes`.
 - **Banda sobre el prompt**: aparece mientras un modelo piensa, mientras corren agentes o cuando el uso pasa de 80 %.
 
 ## Router de modelo
 
-1. **Haiku piensa**: lee la tarea, quién la lanzó y qué modelo pidió, y responde modelo, confianza (0–100) y un razonamiento corto.
+1. **Haiku piensa**: lee la tarea (recortada a 1 500 caracteres), quién la lanzó y qué modelo pidió, y responde solo modelo y confianza (0–100), en ≤30 tokens.
 2. Si Haiku **duda** (confianza < 70 %) o **propone Opus**, **piensa Sonnet** con la propuesta de Haiku a la vista y decide él.
 3. Si Haiku no responde, deciden **reglas** por tipo de agente y palabras clave, sin coste.
 4. Un **workflow** que ya fijó modelo se respeta.
@@ -51,5 +51,6 @@ claude plugin install agent-pulse --marketplace andresvd95/ModsClaude
 
 ## Cambios
 
+- **2.0.1**: sin narración que gaste tokens. Haiku y Sonnet ya no escriben texto de razonamiento (devuelven solo modelo + confianza, ≤30 tokens); la tarea se recorta a 1 500 caracteres; la bitácora deja una línea por agente en vez de narrar cada paso.
 - **2.0.0**: el router muestra quién decidió, la cadena de decisión con confianza, lo que pensó cada modelo y quién lanzó el agente. Segunda opinión de Sonnet cuando Haiku duda o propone Opus. El orquestador narra en vivo cuándo piensan Haiku y Sonnet y a quién asignan la tarea.
 - **0.1.0**: uso 5 h / semanal, agentes con progreso, router Haiku + reglas, bitácora.

@@ -16,9 +16,10 @@ import type {
 } from '../types'
 
 // agent-pulse v2: uso de Claude (5h / semanal), agentes con progreso, un router
-// de modelo que deja ver toda su decisión (quién lanzó el agente, qué pensó
-// Haiku, si consultó a Sonnet, qué se asignó y por qué) y un orquestador que
-// narra en vivo cuándo piensa cada modelo y a quién asigna cada tarea.
+// de modelo que deja ver su decisión (quién lanzó el agente, qué eligió Haiku y
+// con cuánta confianza, si consultó a Sonnet y qué se asignó) y un orquestador
+// que muestra en vivo qué modelo está pensando y a quién asignó cada tarea.
+// Para ahorrar uso, Haiku y Sonnet solo devuelven modelo + confianza: sin texto libre.
 
 const PANE = 'agent-pulse'
 const TITLE = 'Claude Pulse'
@@ -99,11 +100,6 @@ function duration(ms: number): string {
   if (h > 0) return `${h}h ${m}m`
   if (m > 0) return `${m}m ${s % 60}s`
   return `${s}s`
-}
-
-function seconds(ms: number | undefined): string {
-  if (ms === undefined) return ''
-  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
 function resetsIn(now: number, resetsAt: string | undefined): string {
@@ -222,8 +218,8 @@ const TIER_GUIDE = [
   'opus: arquitectura, diseño de sistemas, revisión de seguridad, depuración difícil o concurrente, refactors grandes, planes complejos, decisiones con mucho juicio.',
 ].join('\n')
 
-const ANSWER_FORMAT =
-  'Responde SOLO con JSON en una línea: {"tier":"haiku|sonnet|opus","confidence":0-100,"thought":"tu razonamiento en máximo 20 palabras, en español"}'
+// Respuesta mínima: sin texto libre, para gastar los menos tokens posibles.
+const ANSWER_FORMAT = 'Responde SOLO con JSON, sin nada más: {"tier":"haiku|sonnet|opus","confidence":0-100}'
 
 const HAIKU_SYSTEM = [
   'Eres el enrutador de modelos para subagentes de Claude Code. Elige el modelo MÁS BARATO que haga bien la tarea.',
@@ -239,18 +235,18 @@ const SONNET_SYSTEM = [
   ANSWER_FORMAT,
 ].join('\n')
 
-type Verdict = { tier: PulseTier; confidence: number; thought: string }
+type Verdict = { tier: PulseTier; confidence: number }
 
 function parseVerdict(text: string): Verdict | undefined {
   const m = text.match(/\{[\s\S]*\}/)
   if (!m) return undefined
   try {
-    const p = JSON.parse(m[0]) as { tier?: string; confidence?: number; thought?: string; reason?: string }
+    const p = JSON.parse(m[0]) as { tier?: string; confidence?: number }
     const tier = TIERS.find(t => t === p.tier)
     if (!tier) return undefined
     const raw = typeof p.confidence === 'number' ? p.confidence : 80
     const confidence = Math.round(Math.max(0, Math.min(100, raw <= 1 ? raw * 100 : raw)))
-    return { tier, confidence, thought: short(String(p.thought ?? p.reason ?? '').trim() || 'sin comentario', 140) }
+    return { tier, confidence }
   } catch {
     return undefined
   }
@@ -271,7 +267,7 @@ function byRules(e: AgentSpawnInput): { tier: PulseTier; thought: string } {
 }
 
 // Un modelo "piensa": se marca en vivo en el panel, la banda y la barra de estado
-// mientras dura la llamada, y se narra lo que respondió.
+// mientras dura la llamada. No se le pide texto libre ni se narra paso a paso.
 async function think(
   $: $,
   by: 'haiku' | 'sonnet',
@@ -283,31 +279,21 @@ async function think(
   const startedAt = await $.clock.now()
   const id = `${key}|${by}`
   await update($, thinkingAtom, list => [...(list ?? []), { key: id, by, description, startedAt }])
-  await narrate($, 'think', `🧠 ${TIER_LABEL[by]} pensando: "${short(description, 40)}"…`)
   await refreshStatus($)
   try {
     const r = await $.model.complete({
       model: by,
       system: [{ text: system, cache: true }],
       prompt,
-      maxTokens: 160,
+      maxTokens: 30,
       effort: 'low',
       timeoutMs: by === 'haiku' ? 10000 : 15000,
     })
     const ms = (await $.clock.now()) - startedAt
     const tokens = r.usage.input_tokens + r.usage.output_tokens
     const v = r.isAnswered ? parseVerdict(r.text) : undefined
-    if (!v) {
-      const why = r.isAnswered ? 'respuesta ilegible' : r.reason
-      await narrate($, 'warn', `💭 ${TIER_LABEL[by]} no decidió (${why}) en ${seconds(ms)}`)
-      return { by, thought: why, ms, tokens, failed: true }
-    }
-    await narrate(
-      $,
-      'think',
-      `💭 ${TIER_LABEL[by]} → ${TIER_LABEL[v.tier]} (${v.confidence}%) en ${seconds(ms)}: ${v.thought}`,
-    )
-    return { by, tier: v.tier, confidence: v.confidence, thought: v.thought, ms, tokens }
+    if (!v) return { by, ms, tokens, failed: true }
+    return { by, tier: v.tier, confidence: v.confidence, ms, tokens }
   } finally {
     await update($, thinkingAtom, list => (list ?? []).filter(t => t.key !== id))
     await refreshStatus($)
@@ -320,7 +306,7 @@ function taskText(e: AgentSpawnInput): string {
     e.model ? `Modelo que pidió quien lo lanzó: ${e.model}` : '',
     `Tipo de agente: ${e.subagentType}`,
     `Descripción: ${e.description}`,
-    `Tarea:\n${short(e.prompt, 3000)}`,
+    `Tarea:\n${short(e.prompt, 1500)}`,
   ]
     .filter(Boolean)
     .join('\n')
@@ -332,7 +318,6 @@ async function decide($: $, e: AgentSpawnInput): Promise<Choice> {
   // Un workflow que ya fijó modelo se respeta (salvo presión de uso).
   const fixed = e.workflow ? tierOf(e.model) : undefined
   if (fixed) {
-    await narrate($, 'think', `📋 "${short(e.description, 40)}": el workflow ya fijó ${TIER_LABEL[fixed]}`)
     return {
       steps: [{ by: 'workflow', tier: fixed, thought: 'modelo fijado por el workflow' }],
       decidedBy: 'workflow',
@@ -352,15 +337,13 @@ async function decide($: $, e: AgentSpawnInput): Promise<Choice> {
   const unsure = haiku.tier !== undefined && (haiku.confidence ?? 100) < MIN_CONFIDENCE
   const pricey = haiku.tier === 'opus'
   if (unsure || pricey) {
-    const why = unsure ? `duda (${haiku.confidence}%)` : 'propone Opus, que es caro'
-    await narrate($, 'think', `↗ Haiku ${why}: consulta a Sonnet`)
     const sonnet = await think(
       $,
       'sonnet',
       key,
       label,
       SONNET_SYSTEM,
-      `${ask}\n\nPropuesta de Haiku: ${haiku.tier} (confianza ${haiku.confidence}%): ${haiku.thought}`,
+      `${ask}\n\nPropuesta de Haiku: ${haiku.tier} (confianza ${haiku.confidence}%)`,
     )
     steps.push(sonnet)
     if (sonnet.tier) return { steps, decidedBy: 'sonnet', picked: sonnet.tier }
@@ -371,7 +354,6 @@ async function decide($: $, e: AgentSpawnInput): Promise<Choice> {
   // Haiku no respondió: reglas locales, sin coste.
   const rules = byRules(e)
   steps.push({ by: 'reglas', tier: rules.tier, thought: rules.thought })
-  await narrate($, 'think', `📏 Reglas → ${TIER_LABEL[rules.tier]}: ${rules.thought}`)
   return { steps, decidedBy: 'reglas', picked: rules.tier }
 }
 
@@ -402,8 +384,11 @@ function launcherText(d: PulseDecision): string {
   return d.requested ? `lanzó ${who}, pidió ${modelLabel(d.requested)}` : `lanzó ${who}`
 }
 
-function decidingThought(d: PulseDecision): string {
-  return d.steps.find(s => s.by === d.decidedBy && !s.failed)?.thought ?? ''
+/** "eligió Sonnet (90%)" o, con reglas o workflow, "eligió Reglas: tipo Explore". */
+function decidedText(d: PulseDecision): string {
+  const s = d.steps.find(x => x.by === d.decidedBy && !x.failed)
+  const detail = s?.confidence !== undefined ? ` (${s.confidence}%)` : s?.thought ? `: ${s.thought}` : ''
+  return `eligió ${DECIDER_LABEL[d.decidedBy]}${detail}`
 }
 
 // ---------- registro ----------
@@ -481,7 +466,6 @@ export const register: Register = on => {
     if (mode !== 'off') {
       const choice = await decide($, e)
       const adjusted = underPressure(choice.picked, load)
-      if (adjusted.note) await narrate($, 'warn', `⚠ ${adjusted.note}`)
       decision = {
         ...choice,
         final: adjusted.tier,
@@ -499,7 +483,7 @@ export const register: Register = on => {
     const tier = tierOf(result.model) ?? decision?.final ?? 'sonnet'
     const desc = e.description || e.subagentType
     const reason = decision
-      ? `${decision.applied ? '' : `sugerido ${TIER_LABEL[decision.final]} · `}decidió ${DECIDER_LABEL[decision.decidedBy]}: ${decidingThought(decision)}${decision.pressureNote ? ` · ${decision.pressureNote}` : ''}`
+      ? `${decision.applied ? '' : `sugerido ${TIER_LABEL[decision.final]} · `}${decidedText(decision)}${decision.pressureNote ? ` · ${decision.pressureNote}` : ''}`
       : 'router apagado'
     const agent: PulseAgent = {
       id: result.agentId,
@@ -516,21 +500,21 @@ export const register: Register = on => {
     }
     await update($, agentsAtom, list => [...(list ?? []), agent].slice(-40))
 
+    // Una sola línea por agente: a quién se asignó y quién lo decidió.
     if (!decision) {
-      await narrate($, 'assign', `▶ "${short(desc, 40)}" (${e.subagentType}) corre en ${TIER_LABEL[tier]}: router apagado`, true)
+      await narrate($, 'assign', `▶ "${short(desc, 40)}" → ${TIER_LABEL[tier]} · router apagado`)
     } else if (decision.applied) {
       await narrate(
         $,
         'assign',
-        `▶ "${short(desc, 40)}" asignado a ${TIER_LABEL[tier]} · decidió ${DECIDER_LABEL[decision.decidedBy]} · ${launcherText(decision)}`,
+        `▶ "${short(desc, 40)}" → ${TIER_LABEL[tier]} · decidió ${DECIDER_LABEL[decision.decidedBy]}${decision.pressureNote ? ` · ${decision.pressureNote}` : ''}`,
         true,
       )
     } else {
       await narrate(
         $,
         'assign',
-        `💡 "${short(desc, 40)}": el router sugiere ${TIER_LABEL[decision.final]} (decidió ${DECIDER_LABEL[decision.decidedBy]}) pero corre en ${TIER_LABEL[tier]}`,
-        true,
+        `💡 "${short(desc, 40)}" → sugiere ${TIER_LABEL[decision.final]} (decidió ${DECIDER_LABEL[decision.decidedBy]}), corre en ${TIER_LABEL[tier]}`,
       )
     }
     await refreshStatus($)
@@ -659,7 +643,7 @@ export const register: Register = on => {
               <Text dimColor>
                 {'  '}
                 {short(
-                  `eligió ${DECIDER_LABEL[d.decidedBy]}: ${decidingThought(d)}${d.pressureNote ? ` · ${d.pressureNote}` : ''}${d.applied ? '' : ' · solo sugerido'} · ${launcherText(d)}`,
+                  `${decidedText(d)}${d.pressureNote ? ` · ${d.pressureNote}` : ''}${d.applied ? '' : ' · solo sugerido'} · ${launcherText(d)}`,
                   Math.max(20, cols - 4),
                 )}
               </Text>

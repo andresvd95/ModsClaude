@@ -54,13 +54,13 @@ test('Haiku decide una búsqueda con confianza: se ve quién eligió, el modelo 
     expect(await ui.find({ type: 'Text', text: /Buscar parseConfig/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /2 herr\./ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Haiku 92% → Haiku/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /eligió Haiku: búsqueda simple/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /eligió Haiku \(92%\)/ })).toBeTruthy()
     expect(await ui.find({ type: 'Text', text: /Quién decidió: .*Haiku 1/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /🧠 Haiku pensando/ })).toBeTruthy()
-    expect(await ui.find({ type: 'Text', text: /asignado a Haiku · decidió Haiku · lanzó/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /→ Haiku · decidió Haiku/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /pensando|💭/ })).toBeFalsy() // sin narración paso a paso
     await ui.unmount()
   }
-  expect(toasts.some(t => t.includes('asignado a Haiku'))).toBe(true)
+  expect(toasts.some(t => t.includes('→ Haiku'))).toBe(true)
 
   await $.turn.complete({
     answer: 'listo',
@@ -109,9 +109,8 @@ test('si Haiku duda, piensa Sonnet y su elección es la que se asigna', async ($
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /Haiku 55% → Opus ⟶ Sonnet 90% → Sonnet/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /Haiku duda \(55%\): consulta a Sonnet/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /🧠 Sonnet pensando/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /asignado a Sonnet · decidió Sonnet · lanzó .*pidió Opus/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /→ Sonnet · decidió Sonnet/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /eligió Sonnet \(90%\) · lanzó .*pidió Opus/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -144,7 +143,8 @@ test('mientras Haiku piensa, el panel y la banda lo muestran en vivo', async ($,
   release(undefined)
   await pending
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /asignado a Sonnet/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /→ Sonnet · decidió Haiku/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /pensando/ })).toBeFalsy() // al terminar, ya no hay nadie pensando
   await ui.unmount()
 })
 
@@ -167,7 +167,7 @@ test('en modo sugerir muestra la decisión sin cambiar el modelo', async ($, on)
   await $.agent.spawn({ prompt: 'Lista los archivos', description: 'Listar', subagentType: 'general-purpose' })
   expect(spawned[0]).toBe(undefined)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /el router sugiere Haiku \(decidió Haiku\) pero corre en Opus/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /sugiere Haiku \(decidió Haiku\), corre en Opus/ })).toBeTruthy()
   await ui.unmount()
 })
 
@@ -191,5 +191,25 @@ test('si Haiku no responde, deciden las reglas y el agente arranca igual', async
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /Haiku ✗ ⟶ Reglas → Opus/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /decidió Reglas/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /eligió Reglas: tipo security-reviewer/ })).toBeTruthy()
   await ui.unmount()
+})
+
+test('para ahorrar uso, Haiku solo devuelve modelo y confianza, con pocos tokens', async ($, on) => {
+  const reqs: { maxTokens?: number; system?: string; prompt: string }[] = []
+  mock.store(on)
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'pulse' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('model.complete', (_, e) => (reqs.push(e), answer({ tier: 'sonnet', confidence: 85 })))
+  on('agent.spawn', (_, e) => ({ model: e.model ?? 'claude-opus-5-5', agentId: 'a6' }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({ prompt: 'x'.repeat(5000), description: 'Tarea larga', subagentType: 'general-purpose' })
+  expect(reqs.length).toBe(1)
+  expect(reqs[0]!.maxTokens).toBeLessThanOrEqual(30)
+  expect(reqs[0]!.system ?? '').not.toMatch(/thought|razonamiento/)
+  expect(reqs[0]!.prompt.length).toBeLessThan(2000)
 })

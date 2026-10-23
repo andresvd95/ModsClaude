@@ -6,7 +6,7 @@
 
 Funcionan dentro de la CLI `claude`, así que van contigo a cualquier terminal: **Warp**, **Orca**, Windows Terminal, iTerm o la app de escritorio.
 
-![Versión](https://img.shields.io/badge/versión-v2.0.0-7C4DFF?style=for-the-badge)
+![Versión](https://img.shields.io/badge/versión-v2.0.1-7C4DFF?style=for-the-badge)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-mod-D97757?style=for-the-badge)
 ![Licencia MIT](https://img.shields.io/badge/licencia-MIT-3DA639?style=for-the-badge)
 ![Idioma](https://img.shields.io/badge/idioma-español-1E88E5?style=for-the-badge)
@@ -19,11 +19,13 @@ Funcionan dentro de la CLI `claude`, así que van contigo a cualquier terminal: 
 
 | Mod | Versión | Qué hace |
 | --- | --- | --- |
-| [**agent-pulse**](./agent-pulse) | **v2.0.0** | Uso de Claude por sesión (5 h) y semanal, agentes con barra de progreso, un router que **muestra** qué modelo elige para cada agente y quién tomó la decisión, y un orquestador que narra en vivo cuándo piensan Haiku y Sonnet y a quién asignan cada tarea. |
+| [**agent-pulse**](./agent-pulse) | **v2.0.1** | Uso de Claude por sesión (5 h) y semanal, agentes con barra de progreso, un router que **muestra** qué modelo elige para cada agente y quién tomó la decisión, y un orquestador que muestra en vivo qué modelo está pensando y a quién asignó cada tarea. |
 
 ---
 
 ## 🆕 Novedades de la v2
+
+> **v2.0.1 · más ligero:** Pulse mide el pulso de Claude, no se lo acelera. Haiku y Sonnet ya no escriben un texto de razonamiento para narrarlo: devuelven solo modelo y confianza (≤30 tokens de salida, la tarea recortada a 1 500 caracteres). Su razonamiento interno, el que sí decide, se mantiene. La bitácora ya no narra paso a paso: una línea por agente con a quién se asignó.
 
 La v1 elegía el modelo de cada agente en silencio. La v2 **te enseña toda la decisión**:
 
@@ -32,11 +34,11 @@ La v1 elegía el modelo de cada agente en silencio. La v2 **te enseña toda la d
 | Modelo elegido | ✅ | ✅ |
 | **Quién decidió** (Haiku, Sonnet, reglas o workflow) | — | ✅ |
 | **Cadena de decisión** con confianza de cada modelo | — | ✅ `Haiku 55% → Opus ⟶ Sonnet 90% → Sonnet` |
-| **Qué pensó** el modelo que decidió | — | ✅ |
 | **Quién lanzó** el agente y qué modelo pidió | — | ✅ `lanzó Opus (principal), pidió Opus` |
 | **"Haiku / Sonnet pensando…" en vivo** en el panel, la banda y la barra de estado | — | ✅ |
 | **Segunda opinión de Sonnet** cuando Haiku duda o propone Opus | — | ✅ |
 | Resumen: cuántas decisiones tomó cada modelo y a qué modelo se asignó cada agente | — | ✅ |
+| Sin narración que gaste tokens (v2.0.1) | — | ✅ |
 
 ---
 
@@ -62,23 +64,20 @@ La v1 elegía el modelo de cada agente en silencio. La v2 **te enseña toda la d
 │ ▶ Buscar usos de parseConfig  Explore · Haiku                          │
 │   ███████████░░░░░ ≈66% · 11 herr. · 38s · Grep                        │
 │   🧭 Haiku 94% → Haiku                                                 │
-│   eligió Haiku: búsqueda de un símbolo · lanzó Opus (principal)        │
+│   eligió Haiku (94%) · lanzó Opus (principal)                          │
 │ ▶ Implementar caché de sesión  general-purpose · Sonnet                │
 │   ████░░░░░░░░░░░░ ≈24% · 5 herr. · 1m 12s · Edit                      │
 │   🧭 Haiku 58% → Opus ⟶ Sonnet 88% → Sonnet                            │
-│   eligió Sonnet: implementar caché, no hace falta Opus · lanzó Opus    │
+│   eligió Sonnet (88%) · lanzó Opus (principal), pidió Opus             │
 │ ✓ Revisar seguridad del login  security-reviewer · Opus                │
 │   ████████████████ 100% · 22 herr. · 3m 40s · 84k tok                  │
 │   🧭 Haiku 90% → Opus ⟶ Sonnet 92% → Opus                              │
 │                                                                        │
 │ ORQUESTADOR                                                            │
 │ 🧠 Haiku pensando "Escribir tests del parser" · 2s                     │
-│ 14:32 ▶ "Implementar caché" asignado a Sonnet · decidió Sonnet · …     │
-│ 14:32 💭 Sonnet → Sonnet (88%) en 1.9s: implementar caché, no…         │
-│ 14:32 🧠 Sonnet pensando: "Implementar caché de sesión"…               │
-│ 14:32 ↗ Haiku duda (58%): consulta a Sonnet                            │
-│ 14:32 💭 Haiku → Opus (58%) en 0.8s: quizá requiere diseño             │
-│ 14:32 🧠 Haiku pensando: "Implementar caché de sesión"…                │
+│ 14:32 ▶ "Implementar caché de sesión" → Sonnet · decidió Sonnet        │
+│ 14:31 ✓ "Revisar seguridad del login" (Opus) terminó en 3m 40s         │
+│ 14:30 ▶ "Buscar usos de parseConfig" → Haiku · decidió Haiku           │
 ╰────────────────────────────────────────────────────────────────────────╯
 ```
 
@@ -88,8 +87,8 @@ La v1 elegía el modelo de cada agente en silencio. La v2 **te enseña toda la d
 | --- | --- |
 | 📊 **Uso de Claude** | Ventana de sesión (5 h) y semanal con barra, porcentaje y cuánto falta para que reinicie. También el contexto usado y el costo equivalente de API. |
 | 🤖 **Agentes en vivo** | Cada agente que se lanza con `Task`/`Agent`: modelo asignado, barra de progreso, herramienta actual, tiempo y tokens al terminar. |
-| 🧭 **Decisión del router** | Por agente: la cadena completa (qué propuso cada modelo y con qué confianza), quién decidió, qué pensó, si el uso obligó a bajar de modelo y quién lanzó el agente. |
-| 🧠 **Orquestador** | Narra en vivo: *Haiku pensando…*, lo que respondió, si consulta a Sonnet, *Sonnet pensando…*, y **a quién asignó la tarea**. También el fin de cada agente y las alertas de uso. |
+| 🧭 **Decisión del router** | Por agente: la cadena completa (qué propuso cada modelo y con qué confianza), quién decidió, si el uso obligó a bajar de modelo y quién lanzó el agente. |
+| 🧠 **Orquestador** | Muestra en vivo qué modelo está pensando (*Haiku pensando…*, *Sonnet pensando…*) y, al decidir, una sola línea con **a quién asignó la tarea**. También el fin de cada agente y las alertas de uso. Todo local: no gasta tokens. |
 | 📟 **Barra de estado** | Siempre a la vista: `pulse · 5h 42% · sem 18% · Haiku pensando · 2 agentes` |
 | 📌 **Banda sobre el prompt** | Aparece sola mientras un modelo piensa, mientras corren agentes o cuando el uso pasa de 80 %. Muestra qué modelo eligió cada agente. |
 
@@ -97,7 +96,7 @@ La v1 elegía el modelo de cada agente en silencio. La v2 **te enseña toda la d
 
 ```text
                 ┌──────────────────────────┐
-   agente  ───▶ │ 🧠 Haiku piensa          │  modelo + confianza + razonamiento
+   agente  ───▶ │ 🧠 Haiku piensa          │  responde solo modelo + confianza
                 └────────────┬─────────────┘
                              │
           ¿confianza < 70 % o propone Opus?
@@ -179,7 +178,7 @@ Después abre una sesión nueva.
 
 - Los porcentajes de 5 h y semanal llegan con la primera respuesta de la sesión y solo existen en planes de suscripción (Pro / Max).
 - El progreso de los agentes es una **estimación**: avanza con cada herramienta que usan y llega a 100 % al terminar.
-- "Lo que pensó" cada modelo es el razonamiento corto que devuelve en su respuesta (máximo 20 palabras), no su razonamiento interno completo.
+- Haiku y Sonnet razonan internamente (esfuerzo bajo) y responden solo `{"tier","confidence"}`: nada de texto libre para narrar. El panel, la banda, la bitácora y los avisos se dibujan localmente y no gastan tokens.
 - Cada decisión de Haiku cuesta muy poco. Sonnet solo se consulta cuando Haiku duda o propone Opus, y aun así sale mucho más barato que mandar a Opus una tarea que Sonnet hace bien.
 
 ## 🛠️ Desarrollo

@@ -20,7 +20,8 @@ export type PulseStep = {
   tier?: PulseTier
   /** 0–100 */
   confidence?: number
-  thought: string
+  /** Etiqueta local (reglas o workflow); los modelos no escriben texto libre. */
+  thought?: string
   ms?: number
   tokens?: number
   failed?: boolean
