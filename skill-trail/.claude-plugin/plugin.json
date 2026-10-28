@@ -1,0 +1,8 @@
+{
+  "name": "skill-trail",
+  "version": "0.1.0",
+  "description": "Mini historial de las skills que usas y la skill grande activa (Superpowers, ECC…), compartido con Codex y Hermes.",
+  "author": { "name": "andresvd95" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

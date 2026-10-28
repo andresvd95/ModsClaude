@@ -20,6 +20,7 @@ Funcionan dentro de la CLI `claude`, así que van contigo a cualquier terminal: 
 | Mod | Versión | Qué hace |
 | --- | --- | --- |
 | [**agent-pulse**](./agent-pulse) | **v2.0.1** | Uso de Claude por sesión (5 h) y semanal, agentes con barra de progreso, un router que **muestra** qué modelo elige para cada agente y quién tomó la decisión, y un orquestador que muestra en vivo qué modelo está pensando y a quién asignó cada tarea. |
+| [**skill-trail**](./skill-trail) | **v0.1.0** | Mini historial de las skills que usas y la **skill grande** activa (Superpowers, ECC, Engram…). Funciona en Claude Code, Codex y Hermes, con un historial compartido. |
 
 ---
 
@@ -143,6 +144,61 @@ Un workflow que ya fijó el modelo de su agente se respeta (aparece como decisor
 
 ---
 
+## 🧭 skill-trail
+
+> Qué skills estás usando, en qué orden, y cuál es la skill grande que manda en el proyecto.
+
+```text
+╭─ Skill Trail ────────────────────────────────────────────────╮
+│ SKILL GRANDE                                                 │
+│ ⚡ Superpowers · cargada al iniciar (claude)                  │
+│ también activas: Everything Claude Code, Engram              │
+│ [ actualizar ]                                               │
+│                                                              │
+│ MÁS USADAS 9 usos · claude, codex, hermes                    │
+│   4× superpowers:brainstorming                               │
+│   2× code-review                                             │
+│                                                              │
+│ HISTORIAL                                                    │
+│ 14:32 ✳ brainstorming · superpowers · claude                 │
+│ 14:10 ◎ code-review · codex                                  │
+│ 13:58 ☿ arxiv · research · hermes                            │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+| | |
+| --- | --- |
+| ⚡ **Skill grande** | El marco de trabajo que un plugin carga al iniciar (por ejemplo *"You have superpowers"*). Si no hay, el pack que más usas en el proyecto. Puedes fijarla tú. |
+| 🧾 **Mini historial** | Cada skill que se carga: con `/nombre`, con la herramienta Skill o precargada en un subagente. Hora, pack y agente. |
+| 📟 **Barra de estado** | `skills · ⚡Superpowers · último: brainstorming` |
+| 🔗 **Compartido** | Claude Code, Codex y Hermes escriben en el mismo historial (`~/.skill-trail/trail.jsonl`), por proyecto. |
+
+**Dónde se ve en cada agente**
+
+| Agente | Cómo lo registra | Cómo lo ves |
+| --- | --- | --- |
+| Claude Code (Warp, Orca, Windows Terminal, escritorio) | El mod escucha cada skill y lo que inyectan los plugins al iniciar | `/trail` y la barra de estado |
+| Codex | Hooks `UserPromptSubmit` (`$skill`) y `PostToolUse` (lectura de `SKILL.md`) | `$skill-trail` dentro de Codex |
+| Hermes | Plugin con `skill_view` y `/skill` | `/skilltrail` dentro de Hermes |
+| Cualquier terminal | | `skill-trail` (o `skill-trail status` para una línea) |
+
+| Comando (Claude) | Qué hace |
+| --- | --- |
+| `/trail` | Abre el panel |
+| `/trail fijar superpowers` | Fija la skill grande del proyecto |
+| `/trail soltar` | Vuelve a detectarla sola |
+| `/trail limpiar` | Borra el historial del proyecto |
+
+Para Codex, Hermes y el atajo de terminal (requiere Node 18+), una vez, desde el repo clonado:
+
+```bash
+node skill-trail/cli/skill-trail.mjs install
+```
+
+Respalda `~/.codex/hooks.json` y el `config.yaml` de Hermes antes de tocarlos. Para quitarlo: `skill-trail uninstall` (el historial se conserva).
+
+---
+
 ## 🚀 Instalación
 
 En una sesión de Claude Code, desde cualquier terminal:
@@ -172,6 +228,12 @@ claude plugin update agent-pulse@mods-claude
 
 Después abre una sesión nueva.
 
+Lo mismo para **skill-trail** (cambia el nombre del mod y luego escribe `/trail`):
+
+```text
+/plugin install skill-trail --marketplace andresvd95/ModsClaude
+```
+
 ---
 
 ## 📝 Notas
@@ -186,6 +248,9 @@ Después abre una sesión nueva.
 ```bash
 claude plugin validate agent-pulse
 claude plugin test agent-pulse
+claude plugin validate skill-trail
+claude plugin test skill-trail
+node --test skill-trail/cli/skill-trail.spec.mjs
 ```
 
 ## 📄 Licencia

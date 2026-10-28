@@ -1,0 +1,8 @@
+name: skill-trail
+version: 0.1.0
+description: "Historial de skills y skill grande activa, compartido con Claude Code y Codex."
+author: "andresvd95"
+kind: standalone
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call

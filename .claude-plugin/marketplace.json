@@ -7,6 +7,12 @@
       "source": "./agent-pulse",
       "version": "2.0.1",
       "description": "Uso de Claude (5h y semanal), agentes con progreso, un router que muestra qué modelo elige y quién decidió (Haiku, Sonnet o reglas) y un orquestador que muestra en vivo qué modelo piensa y a quién asignó cada tarea, sin gastar tokens en narración."
+    },
+    {
+      "name": "skill-trail",
+      "source": "./skill-trail",
+      "version": "0.1.0",
+      "description": "Mini historial de las skills que usas y la skill grande activa (Superpowers, ECC…), compartido con Codex y Hermes."
     }
   ]
 }
