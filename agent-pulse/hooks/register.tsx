@@ -37,6 +37,7 @@ const thinkingAtom = atom({ plugin: 'agent-pulse', key: 'thinking' } as const, [
 const TIERS: PulseTier[] = ['haiku', 'sonnet', 'opus']
 const TIER_LABEL: Record<PulseTier, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 const DECIDER_LABEL: Record<PulseDecider, string> = {
+  skill: 'Skill',
   haiku: 'Haiku',
   sonnet: 'Sonnet',
   reglas: 'Reglas',
@@ -314,7 +315,26 @@ function taskText(e: AgentSpawnInput): string {
 
 type Choice = { steps: PulseStep[]; decidedBy: PulseDecider; picked: PulseTier }
 
+/**
+ * Una skill (p. ej. vedev u Octopus) fija el modelo con una línea al inicio del prompt:
+ * `modelo-fijado: sonnet`. Si está, manda sobre el router: la skill tiene más peso que el mod.
+ */
+export function skillTier(e: Pick<AgentSpawnInput, 'prompt'>): PulseTier | undefined {
+  const m = /^\s*modelo-fijado:\s*(haiku|sonnet|opus)\b/im.exec(e.prompt ?? '')
+  return m ? (m[1]!.toLowerCase() as PulseTier) : undefined
+}
+
 async function decide($: $, e: AgentSpawnInput): Promise<Choice> {
+  // Una skill que fijó modelo manda sobre todo lo demás y no se baja por uso.
+  const bySkill = skillTier(e)
+  if (bySkill) {
+    return {
+      steps: [{ by: 'skill', tier: bySkill, thought: 'modelo fijado por la skill' }],
+      decidedBy: 'skill',
+      picked: bySkill,
+    }
+  }
+
   // Un workflow que ya fijó modelo se respeta (salvo presión de uso).
   const fixed = e.workflow ? tierOf(e.model) : undefined
   if (fixed) {
@@ -465,7 +485,11 @@ export const register: Register = on => {
     let decision: PulseDecision | undefined
     if (mode !== 'off') {
       const choice = await decide($, e)
-      const adjusted = underPressure(choice.picked, load)
+      // La skill manda: la presión de uso solo avisa, no baja el modelo que fijó.
+      const adjusted =
+        choice.decidedBy === 'skill'
+          ? { tier: choice.picked, note: load >= 80 ? `uso ${Math.round(load)}% alto, la skill manda` : undefined }
+          : underPressure(choice.picked, load)
       decision = {
         ...choice,
         final: adjusted.tier,

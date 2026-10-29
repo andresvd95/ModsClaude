@@ -1,6 +1,6 @@
 {
   "name": "agent-pulse",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "Uso de Claude (5h y semanal), agentes con progreso, router que muestra qué modelo elige y quién decidió, y orquestador que muestra en vivo qué modelo piensa y a quién asignó cada tarea, sin gastar tokens en narración.",
   "author": { "name": "andresvd95" },
   "license": "MIT",

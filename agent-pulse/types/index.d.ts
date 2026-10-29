@@ -12,7 +12,7 @@ export type PulseUsage = {
 export type PulseAgentStatus = 'running' | 'done' | 'failed' | 'aborted'
 
 /** Quién tomó (o intentó tomar) la decisión de modelo. */
-export type PulseDecider = 'haiku' | 'sonnet' | 'reglas' | 'workflow'
+export type PulseDecider = 'skill' | 'haiku' | 'sonnet' | 'reglas' | 'workflow'
 
 /** Un paso de la cadena de decisión: lo que pensó y eligió cada decisor. */
 export type PulseStep = {

@@ -213,3 +213,35 @@ test('para ahorrar uso, Haiku solo devuelve modelo y confianza, con pocos tokens
   expect(reqs[0]!.system ?? '').not.toMatch(/thought|razonamiento/)
   expect(reqs[0]!.prompt.length).toBeLessThan(2000)
 })
+
+test('si una skill fija el modelo, manda sobre el router y no se consulta a Haiku', async ($, on) => {
+  const spawned: (string | undefined)[] = []
+  const asked: string[] = []
+  mock.store(on)
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'pulse' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('model.complete', (_, e) => {
+    asked.push(e.model)
+    return answer({ tier: 'haiku', confidence: 95 })
+  })
+  on('agent.spawn', (_, e) => {
+    spawned.push(e.model)
+    return { model: e.model ?? 'claude-opus-5-5', agentId: 'a7' }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.agent.spawn({
+    prompt: 'modelo-fijado: opus\nRevisa la arquitectura del módulo de facturación',
+    description: 'Revisión crítica',
+    subagentType: 'general-purpose',
+  })
+  expect(spawned[0]).toBe('opus') // la skill gana aunque Haiku habría elegido otro
+  expect(asked).toEqual([]) // el router ni siquiera piensa: no gasta uso
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /decidió Skill/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /eligió Skill: modelo fijado por la skill/ })).toBeTruthy()
+  await ui.unmount()
+})
